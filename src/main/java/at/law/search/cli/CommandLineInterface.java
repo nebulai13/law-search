@@ -49,6 +49,9 @@ public class CommandLineInterface implements Callable<Integer> {
     @Option(names = {"--police-text"}, description = "Generate police/authority text")
     private boolean policeText;
 
+    @Option(names = {"--max-pages"}, description = "Maximum pages to crawl per source", defaultValue = "1")
+    private int maxPages;
+
     private Journal journal;
     private LuceneIndexer indexer;
     private SearchEngine searchEngine;
@@ -109,10 +112,10 @@ public class CommandLineInterface implements Callable<Integer> {
     }
 
     private void crawlDatabase() {
-        System.out.println("Starting RIS database crawl...");
+        System.out.println("Starting RIS database crawl (max " + maxPages + " pages per source)...");
         System.out.println("This may take a while. Progress will be shown below.\n");
 
-        try (RisCrawler crawler = new RisCrawler(journal)) {
+        try (RisCrawler crawler = new RisCrawler(journal, 500, maxPages)) {
             AtomicInteger totalIndexed = new AtomicInteger(0);
 
             // Crawl Bundesrecht

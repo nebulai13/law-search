@@ -130,10 +130,39 @@ public class LuceneIndexer implements AutoCloseable {
     public List<SearchResult> search(String queryString, int maxResults) throws IOException, ParseException {
         refreshReader();
 
-        QueryParser parser = new QueryParser(FIELD_FULL_TEXT, analyzer);
-        parser.setDefaultOperator(QueryParser.Operator.AND);
-        Query query = parser.parse(queryString);
+        // Search across multiple fields: title, fullText, abbreviation
+        BooleanQuery.Builder boolQuery = new BooleanQuery.Builder();
 
+        // Parse for title field
+        QueryParser titleParser = new QueryParser(FIELD_TITLE, analyzer);
+        titleParser.setDefaultOperator(QueryParser.Operator.AND);
+        try {
+            Query titleQuery = titleParser.parse(queryString);
+            boolQuery.add(titleQuery, BooleanClause.Occur.SHOULD);
+        } catch (Exception e) {
+            log.debug("Title query parse failed: {}", e.getMessage());
+        }
+
+        // Parse for fullText field
+        QueryParser fullTextParser = new QueryParser(FIELD_FULL_TEXT, analyzer);
+        fullTextParser.setDefaultOperator(QueryParser.Operator.AND);
+        try {
+            Query fullTextQuery = fullTextParser.parse(queryString);
+            boolQuery.add(fullTextQuery, BooleanClause.Occur.SHOULD);
+        } catch (Exception e) {
+            log.debug("FullText query parse failed: {}", e.getMessage());
+        }
+
+        // Parse for abbreviation field
+        QueryParser abbrParser = new QueryParser(FIELD_ABBREVIATION + "_text", analyzer);
+        try {
+            Query abbrQuery = abbrParser.parse(queryString);
+            boolQuery.add(abbrQuery, BooleanClause.Occur.SHOULD);
+        } catch (Exception e) {
+            log.debug("Abbreviation query parse failed: {}", e.getMessage());
+        }
+
+        Query query = boolQuery.build();
         return executeSearch(query, maxResults, queryString);
     }
 

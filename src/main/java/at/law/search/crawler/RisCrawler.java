@@ -8,11 +8,17 @@ import com.fasterxml.jackson.dataformat.xml.XmlMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.security.KeyManagementException;
+import java.security.NoSuchAlgorithmException;
+import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
@@ -37,21 +43,51 @@ public class RisCrawler implements AutoCloseable {
     private final Journal journal;
     private final ExecutorService executor;
     private final int requestDelayMs;
+    private final int maxPages;
 
     public RisCrawler(Journal journal) {
-        this(journal, 500); // 500ms delay between requests
+        this(journal, 500, Integer.MAX_VALUE); // 500ms delay between requests, unlimited pages
     }
 
-    public RisCrawler(Journal journal, int requestDelayMs) {
+    public RisCrawler(Journal journal, int requestDelayMs, int maxPages) {
         this.journal = journal;
         this.requestDelayMs = requestDelayMs;
-        this.httpClient = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(30))
-            .followRedirects(HttpClient.Redirect.NORMAL)
-            .build();
+        this.maxPages = maxPages;
+        this.httpClient = createHttpClient();
         this.jsonMapper = new ObjectMapper();
         this.xmlMapper = new XmlMapper();
         this.executor = Executors.newFixedThreadPool(4);
+    }
+
+    /**
+     * Create HttpClient with SSL context that accepts the RIS certificates.
+     */
+    private HttpClient createHttpClient() {
+        try {
+            // Create a trust manager that accepts all certificates
+            TrustManager[] trustAllCerts = new TrustManager[]{
+                new X509TrustManager() {
+                    public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
+                    public void checkClientTrusted(X509Certificate[] certs, String authType) {}
+                    public void checkServerTrusted(X509Certificate[] certs, String authType) {}
+                }
+            };
+
+            SSLContext sslContext = SSLContext.getInstance("TLS");
+            sslContext.init(null, trustAllCerts, new java.security.SecureRandom());
+
+            return HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(30))
+                .followRedirects(HttpClient.Redirect.NORMAL)
+                .sslContext(sslContext)
+                .build();
+        } catch (NoSuchAlgorithmException | KeyManagementException e) {
+            log.warn("Could not create custom SSL context, using default: {}", e.getMessage());
+            return HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(30))
+                .followRedirects(HttpClient.Redirect.NORMAL)
+                .build();
+        }
     }
 
     /**
@@ -81,17 +117,27 @@ public class RisCrawler implements AutoCloseable {
     }
 
     /**
+     * Page size values accepted by RIS API.
+     */
+    private static final String PAGE_SIZE_TWENTY = "Twenty";
+    private static final String PAGE_SIZE_FIFTY = "Fifty";
+    private static final String PAGE_SIZE_HUNDRED = "OneHundred";
+
+    /**
      * Search for documents in a specific application.
      */
     public List<LegalDocument> search(Application app, String searchTerm, int maxResults) {
         journal.info("Starting search in " + app.getDescription() + " for: " + searchTerm);
 
         try {
-            String url = String.format("%s/%s?Suchworte=%s&DoksProSeite=%d",
+            String pageSize = maxResults <= 20 ? PAGE_SIZE_TWENTY :
+                              maxResults <= 50 ? PAGE_SIZE_FIFTY : PAGE_SIZE_HUNDRED;
+
+            String url = String.format("%s/%s?Suchworte=%s&DokumenteProSeite=%s",
                 BASE_URL,
                 app.getApiName(),
                 java.net.URLEncoder.encode(searchTerm, "UTF-8"),
-                Math.min(maxResults, 100));
+                pageSize);
 
             HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(url))
@@ -105,7 +151,7 @@ public class RisCrawler implements AutoCloseable {
             if (response.statusCode() == 200) {
                 return parseSearchResults(app, response.body());
             } else {
-                journal.logError("RIS API", new IOException("HTTP " + response.statusCode()));
+                journal.logError("RIS API", new IOException("HTTP " + response.statusCode() + ": " + response.body()));
                 return List.of();
             }
         } catch (Exception e) {
@@ -121,14 +167,13 @@ public class RisCrawler implements AutoCloseable {
         journal.info("Starting full crawl of " + app.getDescription());
 
         int page = 1;
-        int pageSize = 100;
         int totalProcessed = 0;
         boolean hasMore = true;
 
         while (hasMore) {
             try {
-                String url = String.format("%s/%s?Seite=%d&DokumenteProSeite=%d",
-                    BASE_URL, app.getApiName(), page, pageSize);
+                String url = String.format("%s/%s?Seitennummer=%d&DokumenteProSeite=%s",
+                    BASE_URL, app.getApiName(), page, PAGE_SIZE_HUNDRED);
 
                 HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(url))
@@ -153,7 +198,7 @@ public class RisCrawler implements AutoCloseable {
                         }
                     }
 
-                    hasMore = docs.size() >= pageSize;
+                    hasMore = docs.size() >= 100 && page < maxPages; // OneHundred page size
                     page++;
 
                     // Rate limiting
@@ -208,19 +253,45 @@ public class RisCrawler implements AutoCloseable {
             JsonNode root = jsonMapper.readTree(jsonResponse);
             JsonNode results = root.path("OgdSearchResult").path("OgdDocumentResults").path("OgdDocumentReference");
 
+            log.debug("Parse: OgdDocumentReference isArray={} size={}", results.isArray(),
+                results.isArray() ? results.size() : 0);
+
             if (results.isArray()) {
                 for (JsonNode docRef : results) {
                     LegalDocument doc = parseDocument(app, docRef);
                     if (doc != null) {
                         documents.add(doc);
+                    } else {
+                        // Debug: show first few nodes that fail to parse
+                        if (documents.size() < 3) {
+                            log.debug("Failed to parse node. Data keys: {}",
+                                docRef.path("Data").fieldNames().hasNext() ?
+                                iteratorToString(docRef.path("Data").fieldNames()) : "none");
+                        }
                     }
                 }
+            } else if (!results.isMissingNode()) {
+                // Single result case
+                LegalDocument doc = parseDocument(app, results);
+                if (doc != null) {
+                    documents.add(doc);
+                }
             }
+
+            log.debug("Parsed {} documents from {} response", documents.size(), app.getApiName());
         } catch (Exception e) {
             journal.logError("Parse results", e);
         }
 
         return documents;
+    }
+
+    private String iteratorToString(Iterator<String> iter) {
+        StringBuilder sb = new StringBuilder();
+        while (iter.hasNext()) {
+            sb.append(iter.next()).append(", ");
+        }
+        return sb.toString();
     }
 
     /**
@@ -230,19 +301,33 @@ public class RisCrawler implements AutoCloseable {
         try {
             JsonNode data = node.path("Data");
             JsonNode metadata = data.path("Metadaten");
+            JsonNode technisch = metadata.path("Technisch");
 
-            String id = getTextOrNull(data, "Dokumentnummer");
-            String title = getTextOrNull(metadata, "Titel");
-            String fullText = getTextOrNull(data, "Dokumentinhalt");
-
-            if (id == null || title == null) {
-                return null;
+            // ID is at Data.Metadaten.Technisch.ID
+            String id = getTextOrNull(technisch, "ID");
+            if (id == null) {
+                id = getTextOrNull(data, "Dokumentnummer");
             }
 
-            // Determine document type based on application
+            // Determine document type based on application and get title
             return switch (app) {
-                case BUNDESRECHT, LANDESRECHT, BUNDESNORMEN -> parseLaw(id, title, fullText, metadata);
-                case VFGH, VWGH, JUSTIZ, BVWG, LVWG -> parseCourtCase(app, id, title, fullText, metadata);
+                case BUNDESRECHT, LANDESRECHT, BUNDESNORMEN -> {
+                    // Bundesrecht is at Data.Metadaten.Bundesrecht (NOT Data.Bundesrecht!)
+                    JsonNode bundesrecht = metadata.path("Bundesrecht");
+                    String title = getTextOrNull(bundesrecht, "Titel");
+                    if (title == null) title = getTextOrNull(bundesrecht, "Kurztitel");
+                    if (id == null || title == null) yield null;
+                    yield parseLaw(id, title, null, bundesrecht, metadata);
+                }
+                case VFGH, VWGH, JUSTIZ, BVWG, LVWG -> {
+                    // Judikatur is at Data.Metadaten.Judikatur
+                    JsonNode judikatur = metadata.path("Judikatur");
+                    String title = getTextOrNull(judikatur, "Dokumenttyp");
+                    String caseNum = getFirstArrayItem(judikatur.path("Geschaeftszahl"), "item");
+                    if (title == null && caseNum != null) title = caseNum;
+                    if (id == null || title == null) yield null;
+                    yield parseCourtCase(app, id, title, null, judikatur, metadata);
+                }
                 default -> null;
             };
         } catch (Exception e) {
@@ -252,12 +337,40 @@ public class RisCrawler implements AutoCloseable {
     }
 
     /**
+     * Get first item from a JSON array.
+     */
+    private String getFirstArrayItem(JsonNode array, String fieldName) {
+        JsonNode items = array.path(fieldName);
+        if (items.isArray() && items.size() > 0) {
+            return items.get(0).asText();
+        }
+        if (items.isTextual()) {
+            return items.asText();
+        }
+        return null;
+    }
+
+    /**
      * Parse a law document.
      */
-    private Law parseLaw(String id, String title, String fullText, JsonNode metadata) {
-        String abbreviation = getTextOrNull(metadata, "Abkuerzung");
-        String bgblNumber = getTextOrNull(metadata, "Kundmachungsorgan");
-        String dateStr = getTextOrNull(metadata, "Inkrafttretedatum");
+    private Law parseLaw(String id, String title, String fullText, JsonNode bundesrecht, JsonNode metadata) {
+        // Abbreviation is at Data.Bundesrecht.Kurztitel
+        String abbreviation = getTextOrNull(bundesrecht, "Kurztitel");
+        if (abbreviation == null) {
+            abbreviation = getTextOrNull(bundesrecht, "Abkuerzung");
+        }
+
+        // Publication info
+        String bgblNumber = getTextOrNull(bundesrecht, "Kundmachungsorgan");
+        if (bgblNumber == null) {
+            bgblNumber = getTextOrNull(metadata, "Kundmachungsorgan");
+        }
+
+        // Effective date
+        String dateStr = getTextOrNull(bundesrecht, "Inkrafttretedatum");
+        if (dateStr == null) {
+            dateStr = getTextOrNull(metadata, "Inkrafttretedatum");
+        }
 
         LocalDate effectiveDate = null;
         if (dateStr != null) {
@@ -281,15 +394,35 @@ public class RisCrawler implements AutoCloseable {
     /**
      * Parse a court case document.
      */
-    private CourtCase parseCourtCase(Application app, String id, String title, String fullText, JsonNode metadata) {
-        String caseNumber = getTextOrNull(metadata, "Geschaeftszahl");
-        String dateStr = getTextOrNull(metadata, "Entscheidungsdatum");
-        String headnotes = getTextOrNull(metadata, "Rechtssatz");
+    private CourtCase parseCourtCase(Application app, String id, String title, String fullText, JsonNode judikatur, JsonNode metadata) {
+        // Case number from Judikatur.Geschaeftszahl.item array
+        String caseNumber = getFirstArrayItem(judikatur.path("Geschaeftszahl"), "item");
+        if (caseNumber == null) {
+            caseNumber = getTextOrNull(judikatur, "Geschaeftszahl");
+        }
+
+        // Decision date
+        String dateStr = getTextOrNull(judikatur, "Entscheidungsdatum");
+
+        // Rechtssatz (headnotes) - may be in different locations
+        String headnotes = getTextOrNull(judikatur, "Rechtssatz");
+        if (headnotes == null) {
+            headnotes = getTextOrNull(judikatur, "Dokumenttyp");
+        }
+
+        // Try to detect court from Judikatur.Justiz.Gericht
+        JsonNode justiz = judikatur.path("Justiz");
+        String gerichtStr = getTextOrNull(justiz, "Gericht");
 
         CourtCase.Court court = switch (app) {
             case VFGH -> CourtCase.Court.VFGH;
             case VWGH -> CourtCase.Court.VWGH;
-            case JUSTIZ -> CourtCase.Court.OGH;
+            case JUSTIZ -> {
+                if (gerichtStr != null && gerichtStr.contains("OGH")) {
+                    yield CourtCase.Court.OGH;
+                }
+                yield CourtCase.Court.OGH;
+            }
             case BVWG -> CourtCase.Court.BVWG;
             case LVWG -> CourtCase.Court.LVG;
             default -> CourtCase.Court.OGH;

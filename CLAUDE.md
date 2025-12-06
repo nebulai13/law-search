@@ -4,7 +4,7 @@
 A Java 21/25 application that crawls Austrian law databases, creates an indexed database, and provides intelligent legal search with context-aware responses - essentially a "pocket lawyer" for Austrian law.
 
 ## Current Status
-**Phase**: Initial Setup and Architecture Design
+**Phase**: Functional MVP - Crawler and Search Working
 **Last Updated**: 2025-12-06
 
 ---
@@ -25,6 +25,20 @@ A Java 21/25 application that crawls Austrian law databases, creates an indexed 
 - [x] Fixed compilation errors and built fat JAR
 - [x] Pushed to GitHub: nebulai13/law-search and qwitch13/law-search
 - [x] Fixed duplicate stop words bug in QueryParser (duplicate "an" and "in")
+
+### Session 2 - 2025-12-06 (Continued)
+- [x] Fixed SSL certificate handling for RIS API (PKIX path building issue)
+- [x] Fixed RIS API parameter format (DokumenteProSeite enum values)
+- [x] Fixed JSON parsing paths for RIS API responses:
+  - ID: `Data.Metadaten.Technisch.ID`
+  - Title: `Data.Metadaten.Bundesrecht.Titel`
+  - Judikatur: `Data.Metadaten.Judikatur`
+- [x] Fixed search to query multiple fields (title, fullText, abbreviation)
+- [x] Added maxPages parameter for controlled crawling
+- [x] Added --max-pages CLI option for testing
+- [x] Verified crawler successfully indexes 100 documents per page
+- [x] Verified search returns relevant results with highlighting
+- [x] Note: VfGH endpoint returns 404 (may need different API pattern)
 
 ---
 

@@ -234,8 +234,8 @@ public class QueryParser {
             "in", "im", "an", "am", "auf", "für", "mit", "bei", "nach", "von", "zu",
             "ist", "sind", "war", "waren", "wird", "werden", "hat", "haben",
             "ich", "du", "er", "sie", "es", "wir", "ihr",
-            // English
-            "the", "a", "an", "and", "or", "in", "on", "at", "for", "with", "by",
+            // English (excluding duplicates with German: "an", "in")
+            "the", "a", "and", "or", "on", "at", "for", "with", "by",
             "to", "of", "is", "are", "was", "were", "be", "been", "being",
             "have", "has", "had", "do", "does", "did"
         );

@@ -24,6 +24,7 @@ A Java 21/25 application that crawls Austrian law databases, creates an indexed 
 - [x] Created CLI interface with progress tracking
 - [x] Fixed compilation errors and built fat JAR
 - [x] Pushed to GitHub: nebulai13/law-search and qwitch13/law-search
+- [x] Fixed duplicate stop words bug in QueryParser (duplicate "an" and "in")
 
 ---
 
